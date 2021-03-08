@@ -1,0 +1,282 @@
+Description: >-
+  Upload an object to an S3 bucket, triggering a Lambda event which returns the
+  object key as an Output.
+Parameters:
+  Key:
+    Description: S3 Object key
+    Type: String
+    Default: test
+  Body:
+    Description: S3 Object body content
+    Type: String
+    Default: TEST CONTENT
+  BucketName:
+    Description: S3 Bucket name
+    Type: String
+Resources:
+  Bucket:
+    Type: 'AWS::S3::Bucket'
+    DependsOn: BucketPermission
+    Properties:
+      BucketName: !Ref BucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Function: !GetAtt BucketWatcher.Arn
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 7830cbc1-96ee-48a0-a17d-16a8f5979572
+  BucketPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref BucketWatcher
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Sub 'arn:aws:s3:::${BucketName}'
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 42eeb8cf-1090-4b83-976a-ea4e68c5e2ff
+  ReadPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref Bucket
+      PolicyDocument:
+        Statement:
+          - Action: 's3:GetObject'
+            Effect: Allow
+            Resource: !Sub 'arn:aws:s3:::${S3Bucket}/*'
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOriginAccessIdentity.S3CanonicalUserId
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 4a4c6bd8-8ba3-4864-b218-2c4a957b3fe8
+  CloudFrontOriginAccessIdentity:
+    Type: 'AWS::CloudFront::CloudFrontOriginAccessIdentity'
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Ref BucketName
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 6188f16b-0422-424e-8a04-9ac5ebb4c9cf
+  CloudFrontDistribution:
+    Type: 'AWS::CloudFront::Distribution'
+    Properties:
+      DistributionConfig:
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 404
+            ResponsePagePath: !Ref ErrorPagePath
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          Compress: true
+          DefaultTTL: 3600
+          ForwardedValues:
+            Cookies:
+              Forward: none
+            QueryString: false
+          MaxTTL: 86400
+          MinTTL: 60
+          TargetOriginId: s3origin
+          ViewerProtocolPolicy: allow-all
+        DefaultRootObject: !Ref DefaultRootObject
+        Enabled: true
+        HttpVersion: http2
+        Origins:
+          - DomainName: !GetAtt Bucket.DomainName
+            Id: s3origin
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub >-
+                origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}
+        PriceClass: PriceClass_All
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: b807fda6-c245-44a9-8b27-49fff95724e5
+  BucketWatcher:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: Sends a Wait Condition signal to Handle when invoked
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: !Sub |
+          exports.handler = function(event, context) {
+            console.log("Request received:\n", JSON.stringify(event));
+            var responseBody = JSON.stringify({
+              "Status" : "SUCCESS",
+              "UniqueId" : "Key",
+              "Data" : event.Records[0].s3.object.key,
+              "Reason" : ""
+            });
+            var https = require("https");
+            var url = require("url");
+            var parsedUrl = url.parse('${Handle}');
+            var options = {
+                hostname: parsedUrl.hostname,
+                port: 443,
+                path: parsedUrl.path,
+                method: "PUT",
+                headers: {
+                    "content-type": "",
+                    "content-length": responseBody.length
+                }
+            };
+            var request = https.request(options, function(response) {
+                console.log("Status code: " + response.statusCode);
+                console.log("Status message: " + response.statusMessage);
+                context.done();
+            });
+            request.on("error", function(error) {
+                console.log("send(..) failed executing https.request(..): " + error);
+                context.done();
+            });
+            request.write(responseBody);
+            request.end();
+          };
+      Timeout: 30
+      Runtime: nodejs4.3
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 3a48410c-9828-4135-9aa7-5c268f5355eb
+  Handle:
+    Type: 'AWS::CloudFormation::WaitConditionHandle'
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: f9e1e0cd-ca80-465c-bf22-ba631564c73e
+  Wait:
+    Type: 'AWS::CloudFormation::WaitCondition'
+    Properties:
+      Handle: !Ref Handle
+      Timeout: 300
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: a6238ea0-897d-4998-9e6c-6613e0597f10
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: S3Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 'S3:DeleteObject'
+                Resource: !Sub 'arn:aws:s3:::${BucketName}/${Key}'
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 519b951e-6e08-4232-9722-c98d6599a34f
+Outputs:
+  Result:
+    Value: !GetAtt Wait.Data
+Metadata:
+  'AWS::CloudFormation::Designer':
+    519b951e-6e08-4232-9722-c98d6599a34f:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 90
+        'y': 90
+      z: 1
+      embeds: []
+    f9e1e0cd-ca80-465c-bf22-ba631564c73e:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 60
+        'y': 210
+      z: 1
+      embeds: []
+    a6238ea0-897d-4998-9e6c-6613e0597f10:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: -50
+        'y': 310
+      z: 1
+      embeds: []
+      isassociatedwith:
+        - f9e1e0cd-ca80-465c-bf22-ba631564c73e
+    3a48410c-9828-4135-9aa7-5c268f5355eb:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 300
+        'y': 90
+      z: 1
+      embeds: []
+    42eeb8cf-1090-4b83-976a-ea4e68c5e2ff:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 300
+        'y': 210
+      z: 1
+      embeds: []
+      isassociatedwith:
+        - 3a48410c-9828-4135-9aa7-5c268f5355eb
+    7830cbc1-96ee-48a0-a17d-16a8f5979572:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 510
+        'y': 480
+      z: 1
+      embeds: []
+      dependson:
+        - 42eeb8cf-1090-4b83-976a-ea4e68c5e2ff
+    b807fda6-c245-44a9-8b27-49fff95724e5:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 900
+        'y': 210
+      z: 1
+      embeds: []
+    6188f16b-0422-424e-8a04-9ac5ebb4c9cf:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 970
+        'y': 370
+      z: 1
+      embeds: []
+    4a4c6bd8-8ba3-4864-b218-2c4a957b3fe8:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 690
+        'y': 170
+      z: 1
+      embeds: []
+      isassociatedwith:
+        - 7830cbc1-96ee-48a0-a17d-16a8f5979572
